@@ -104,3 +104,109 @@
     b
   )
 )
+
+;; CORE AMM ALGORITHM
+
+;; Calculates output amount using constant product formula with fees
+(define-private (calculate-swap-output
+    (input-amount uint)
+    (input-reserve uint)
+    (output-reserve uint)
+  )
+  (let (
+      (input-with-fee (safe-multiply input-amount (- PRECISION (var-get protocol-fee-rate))))
+      (numerator (safe-multiply input-with-fee output-reserve))
+      (denominator (+ (safe-multiply input-reserve PRECISION) input-with-fee))
+    )
+    (/ numerator denominator)
+  )
+)
+
+;; Mints liquidity provider tokens based on proportional contribution
+(define-private (mint-liquidity-tokens
+    (pool-id uint)
+    (amount-x uint)
+    (amount-y uint)
+    (recipient principal)
+  )
+  (let (
+      (pool (unwrap! (map-get? pools pool-id) ERR-POOL-NOT-FOUND))
+      (total-shares (get total-shares pool))
+      (shares-to-mint (if (is-eq total-shares u0)
+        (safe-multiply amount-x amount-y) ;; Genesis liquidity
+        (minimum (/ (safe-multiply amount-x total-shares) (get reserve-x pool))
+          (/ (safe-multiply amount-y total-shares) (get reserve-y pool))
+        )
+      ))
+    )
+    ;; Update pool reserves
+    (map-set pools pool-id
+      (merge pool {
+        reserve-x: (+ (get reserve-x pool) amount-x),
+        reserve-y: (+ (get reserve-y pool) amount-y),
+        total-shares: (+ total-shares shares-to-mint),
+      })
+    )
+
+    ;; Update provider position
+    (map-set liquidity-providers {
+      pool-id: pool-id,
+      provider: recipient,
+    } { shares: (+
+      (default-to u0
+        (get shares
+          (map-get? liquidity-providers {
+            pool-id: pool-id,
+            provider: recipient,
+          })
+        ))
+      shares-to-mint
+    ) }
+    )
+    (ok shares-to-mint)
+  )
+)
+
+;; PUBLIC PROTOCOL FUNCTIONS
+
+;; Creates a new trading pair pool
+(define-public (create-pool
+    (token-x <ft-trait>)
+    (token-y <ft-trait>)
+  )
+  (let (
+      (pool-id (var-get total-pools))
+      (token-x-principal (contract-of token-x))
+      (token-y-principal (contract-of token-y))
+    )
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-NOT-AUTHORIZED)
+    (asserts! (not (is-eq token-x-principal token-y-principal)) ERR-INVALID-POOL)
+
+    (map-set pools pool-id {
+      token-x: token-x-principal,
+      token-y: token-y-principal,
+      reserve-x: u0,
+      reserve-y: u0,
+      total-shares: u0,
+      active: true,
+    })
+
+    (var-set total-pools (+ pool-id u1))
+    (ok pool-id)
+  )
+)
+
+;; Provides liquidity to earn trading fees
+(define-public (add-liquidity
+    (pool-id uint)
+    (token-x <ft-trait>)
+    (token-y <ft-trait>)
+    (amount-x uint)
+    (amount-y uint)
+    (min-shares uint)
+  )
+  (let (
+      (pool (unwrap! (map-get? pools pool-id) ERR-POOL-NOT-FOUND))
+      (token-x-principal (contract-of token-x))
+      (token-y-principal (contract-of token-y))
+    )
